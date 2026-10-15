@@ -1369,6 +1369,17 @@ def miles_validate_args(args):
             f"chunk={args.offload_train_disk_chunk_mb}MB"
         )
 
+    if args.stream_optimizer_state_page_cache_mb is not None:
+        assert args.stream_optimizer_state_to_disk, (
+            "--stream-optimizer-state-page-cache-mb caps the page cache of the streamed optimizer state; "
+            "it needs --stream-optimizer-state-to-disk"
+        )
+        assert args.stream_optimizer_state_page_cache_mb >= 0, "--stream-optimizer-state-page-cache-mb must be >= 0"
+        assert args.train_backend == "megatron", (
+            "--stream-optimizer-state-page-cache-mb caps the Megatron Adam bucket store; "
+            "it is not supported on other backends"
+        )
+
     if args.stream_optimizer_state_to_disk:
         assert args.train_backend in (
             "megatron",
@@ -1398,6 +1409,10 @@ def miles_validate_args(args):
                 "--stream-optimizer-state-to-disk with Muon is the disk backend for the chunked "
                 "offloader; pass --chunked-optimizer-state-offload and a non-zero "
                 "--optimizer-state-offload-fraction"
+            )
+            assert args.stream_optimizer_state_page_cache_mb is None, (
+                "--stream-optimizer-state-page-cache-mb caps the Adam bucket store; Muon's disk state is "
+                "file-backed mappings the chunked offloader owns"
             )
         else:
             assert (
@@ -1442,9 +1457,11 @@ def miles_validate_args(args):
         assert (
             not args.enable_witness
         ), "--enable-witness reads the master optimizer's per-param state, which the NVMe store owns"
+        page_cache_mb = args.stream_optimizer_state_page_cache_mb
         logger.info(
             f"Streaming optimizer state to disk, dir={args.offload_train_disk_dir}, "
-            f"chunk={args.offload_train_disk_chunk_mb}MB, moments={args.stream_optimizer_state_moment_dtype}"
+            f"chunk={args.offload_train_disk_chunk_mb}MB, moments={args.stream_optimizer_state_moment_dtype}, "
+            f"page cache {'left to the kernel' if page_cache_mb is None else f'capped at {page_cache_mb}MB'}"
         )
 
     if args.async_max_concurrent_samples is not None:
