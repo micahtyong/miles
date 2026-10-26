@@ -19,36 +19,47 @@ def _normalize_text(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
 
 
+# Keywords match case-insensitively, but the option itself must be a standalone capital
+# letter, so words such as "definitely" or the article "A" are never read as options.
+_LETTER = r"\(?([A-Z])\)?(?![A-Za-z0-9])"
+_LETTER_PATTERNS = [
+    r"(?i:final\s*(?:answer|option))\s*(?i:is|:)?\s*(?:[a-z]+\s+)?" + _LETTER,
+    r"(?i:answer|option|choice)\s*(?i:is|:)?\s*(?:[a-z]+\s+)?" + _LETTER,
+    r"\b([A-Z])\s*(?i:is\s*(?:the\s*)?correct)",
+]
+
+
 def _extract_letter_from_response(response: str, valid_letters: Iterable[str]) -> str | None:
     """
-    Best-effort extraction of the selected option letter from the model response.
+    Extract the single option letter the model committed to, or None if it did not commit.
     """
     if not response:
         return None
 
     text = _strip_chain_of_thought(response)
-    patterns = [
-        r"(?:answer|option|choice)\s*(?:is|:)?\s*([A-Z])",
-        r"([A-Z])\s*(?:is\s*(?:the)?\s*correct)",
-        r"final\s*(?:answer|option)\s*(?:is|:)?\s*([A-Z])",
-    ]
-
     valid_letters = {letter.upper() for letter in valid_letters}
-    for pattern in patterns:
-        match = re.search(pattern, text, flags=re.IGNORECASE)
-        if match:
-            letter = match.group(1).upper()
-            if letter in valid_letters:
-                return letter
+    for pattern in _LETTER_PATTERNS:
+        match = re.search(pattern, text)
+        if match and match.group(1) in valid_letters:
+            return match.group(1)
 
-    # Fallback: last standalone capital letter that is valid.
-    candidates = re.findall(r"\b([A-Z])\b", text)
-    for letter in reversed(candidates):
-        letter = letter.upper()
-        if letter in valid_letters:
-            return letter
+    # Fallback: the whole answer is a bare option letter, e.g. "B", "(B)" or "B.".
+    match = re.fullmatch(r"\W*\(?([A-Z])\)?\W*", text.strip())
+    if match and match.group(1) in valid_letters:
+        return match.group(1)
 
     return None
+
+
+def _unique_choice_letter(response: str, choices: list, valid_letters: list[str]) -> str | None:
+    """Return the letter of the only choice whose text appears in the response, if exactly one does."""
+    normalized_response = f" {_normalize_text(_strip_chain_of_thought(response))} "
+    matched = [
+        letter
+        for letter, choice in zip(valid_letters, choices, strict=False)
+        if _normalize_text(str(choice)) and f" {_normalize_text(str(choice))} " in normalized_response
+    ]
+    return matched[0] if len(matched) == 1 else None
 
 
 def compute_gpqa_reward(response: str, label, metadata: dict | None = None) -> float:
@@ -100,27 +111,21 @@ def compute_gpqa_reward(response: str, label, metadata: dict | None = None) -> f
     if extracted_letter and correct_letter:
         return 1.0 if extracted_letter == correct_letter else 0.0
 
-    candidate_answers = []
+    # Without a committed letter, credit the answer text only when it names exactly one option.
+    # A response that lists several options is a hedge and scores 0.
     if correct_letter and choices:
-        try:
-            idx = valid_letters.index(correct_letter)
-        except ValueError:
-            idx = None
-        if idx is not None and idx < len(choices):
-            candidate_answers.append(str(choices[idx]))
+        return 1.0 if _unique_choice_letter(response, choices, valid_letters) == correct_letter else 0.0
 
-    for key in ("correct_answer", "answer_text"):
-        value = metadata.get(key)
-        if value:
-            candidate_answers.append(str(value))
-
-    if label_text:
+    # Single-letter labels are option letters, never answer text: a substring test on them
+    # would credit any response containing that character.
+    candidate_answers = [str(metadata[key]) for key in ("correct_answer", "answer_text") if metadata.get(key)]
+    if label_text and not correct_letter:
         candidate_answers.append(label_text)
 
-    normalized_targets = {_normalize_text(text) for text in candidate_answers if text}
-    normalized_response = _normalize_text(_strip_chain_of_thought(response))
+    normalized_targets = {_normalize_text(text) for text in candidate_answers if len(text.strip()) > 1}
+    normalized_response = f" {_normalize_text(_strip_chain_of_thought(response))} "
     for target in normalized_targets:
-        if target and target in normalized_response:
+        if target and f" {target} " in normalized_response:
             return 1.0
 
     if extracted_letter and not correct_letter and label_text:

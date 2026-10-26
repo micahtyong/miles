@@ -47,7 +47,13 @@ class TestExtractLetterFromResponse:
             ("Option A is the best choice", "A"),
             ("</think>The answer is B", "B"),
             ("After analysis, my choice is C", "C"),
-            ("A B C D", "D"),
+            ("A B C D", None),
+            ("The answer is definitely A", "A"),
+            ("The answer is clearly B.", "B"),
+            ("The answer is (B). A quick check confirms it.", "B"),
+            ("The answer depends on the solvent; I pick B", None),
+            ("A quick check shows nothing conclusive", None),
+            ("(C)", "C"),
             ("No valid letter here", None),
             ("", None),
             (None, None),
@@ -80,7 +86,38 @@ class TestComputeGpqaReward:
             ("Answer: A", "", {"choices": {"A": "Paris", "B": "London"}, "correct_letter": "A"}, 1.0),
             ("The answer is Paris", "Paris", {"choices": ["Paris", "London", "Berlin", "Rome"]}, 1.0),
             ("Let me think step by step...</think>The answer is A", "A", None, 1.0),
+            ("The answer is definitely A", "A", None, 1.0),
         ],
     )
     def test_compute_gpqa_reward(self, response, label, metadata, expected):
+        assert compute_gpqa_reward(response, label, metadata=metadata) == expected
+
+    @pytest.mark.parametrize("label", ["A", "B", "C", "D"])
+    def test_no_committed_letter_scores_zero(self, label):
+        assert compute_gpqa_reward("abcd", label) == 0.0
+        assert (
+            compute_gpqa_reward("The product depends on which hydride shifts; both pathways look plausible.", label)
+            == 0.0
+        )
+
+    @pytest.mark.parametrize(
+        "response,label,metadata,expected",
+        [
+            (
+                "the candidates are paris, london, rome and berlin.",
+                0,
+                {"choices": ["Paris", "London", "Rome", "Berlin"]},
+                0.0,
+            ),
+            (
+                "the candidates are paris, london, rome and berlin.",
+                3,
+                {"choices": ["Paris", "London", "Rome", "Berlin"]},
+                0.0,
+            ),
+            ("It is not Rome, it is Paris", 0, {"choices": ["Paris", "London", "Rome", "Berlin"]}, 0.0),
+            ("Parisian food is great, the city is Berlin", 3, {"choices": ["Paris", "London", "Rome", "Berlin"]}, 1.0),
+        ],
+    )
+    def test_listing_several_choices_is_a_hedge(self, response, label, metadata, expected):
         assert compute_gpqa_reward(response, label, metadata=metadata) == expected
