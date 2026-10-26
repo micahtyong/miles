@@ -20,13 +20,32 @@ def _normalize_text(text: str) -> str:
 
 
 # Keywords match case-insensitively, but the option itself must be a standalone capital
-# letter, so words such as "definitely" or the article "A" are never read as options.
+# letter, so words such as "definitely" or the article "A" are never read as options. At most one
+# lowercase filler word may sit between keyword and letter, and never a negation ("is not A").
 _LETTER = r"\(?([A-Z])\)?(?![A-Za-z0-9])"
+_FILLER = r"(?:(?!(?:not|never|no)\b)[a-z]+\s+)?"
 _LETTER_PATTERNS = [
-    r"(?i:final\s*(?:answer|option))\s*(?i:is|:)?\s*(?:[a-z]+\s+)?" + _LETTER,
-    r"(?i:answer|option|choice)\s*(?i:is|:)?\s*(?:[a-z]+\s+)?" + _LETTER,
-    r"\b([A-Z])\s*(?i:is\s*(?:the\s*)?correct)",
+    r"(?i:final\s*(?:answer|option))\s*(?i:is)?\s*[:\-]?\s*" + _FILLER + _LETTER,
+    r"(?i:answer|option|choice)\s*(?i:is)?\s*[:\-]?\s*" + _FILLER + _LETTER,
+    r"\b([A-Z])\)?\s*(?i:is\s*(?:the\s*)?correct)",
 ]
+# An option label at the start of the answer, e.g. "C. 42 eV" or "(C) 42 eV" inside a box.
+# The text after it must not be another option label, so "(A) (B) (C) (D)" is not a commitment.
+_LEADING_LABEL = r"\s*\(?([A-Z])(?:[.:]|\))\s+(?!\(?[A-Z](?:[.:)\s]|$))\S.*"
+# A letter that ends the answer, e.g. "I pick B", "Therefore, B." or a bare "(B)".
+_TRAILING_LETTER = r"(?:^|[^\w(])\(?([A-Z])\)?[.!]?\s*$"
+# Text right before that trailing letter that makes it a hedge or a rejection rather than a
+# commitment: one item of a list ("A B C D", "A or B") or a negated option ("not C").
+_NOT_COMMITTED_TAIL = r"(?:\b[A-Z]\)?\s*(?:[,./;]|\bor\b|\band\b)?|(?i:\b(?:not|never|no)))\s*\(?$"
+
+
+def _unwrap_markup(text: str) -> str:
+    """Drop markdown emphasis, `$` and LaTeX wrappers such as `\boxed{C}` or `\text{C}`, keeping their contents."""
+    previous = None
+    while previous != text:
+        previous = text
+        text = re.sub(r"\\(?:boxed|text|textbf|mathrm|mathbf)\s*\{([^{}]*)\}", r"\1", text)
+    return re.sub(r"\*\*|__|\$", "", text)
 
 
 def _extract_letter_from_response(response: str, valid_letters: Iterable[str]) -> str | None:
@@ -36,16 +55,20 @@ def _extract_letter_from_response(response: str, valid_letters: Iterable[str]) -
     if not response:
         return None
 
-    text = _strip_chain_of_thought(response)
+    text = _unwrap_markup(_strip_chain_of_thought(response)).strip()
     valid_letters = {letter.upper() for letter in valid_letters}
     for pattern in _LETTER_PATTERNS:
         match = re.search(pattern, text)
         if match and match.group(1) in valid_letters:
             return match.group(1)
 
-    # Fallback: the whole answer is a bare option letter, e.g. "B", "(B)" or "B.".
-    match = re.fullmatch(r"\W*\(?([A-Z])\)?\W*", text.strip())
+    match = re.fullmatch(_LEADING_LABEL, text, flags=re.DOTALL)
     if match and match.group(1) in valid_letters:
+        return match.group(1)
+
+    last_line = text.splitlines()[-1] if text else ""
+    match = re.search(_TRAILING_LETTER, last_line)
+    if match and match.group(1) in valid_letters and not re.search(_NOT_COMMITTED_TAIL, last_line[: match.start(1)]):
         return match.group(1)
 
     return None
@@ -53,12 +76,17 @@ def _extract_letter_from_response(response: str, valid_letters: Iterable[str]) -
 
 def _unique_choice_letter(response: str, choices: list, valid_letters: list[str]) -> str | None:
     """Return the letter of the only choice whose text appears in the response, if exactly one does."""
-    normalized_response = f" {_normalize_text(_strip_chain_of_thought(response))} "
-    matched = [
-        letter
-        for letter, choice in zip(valid_letters, choices, strict=False)
-        if _normalize_text(str(choice)) and f" {_normalize_text(str(choice))} " in normalized_response
+    # Match longer choices first and blank them out, so a choice nested inside the named one
+    # ("2-butanol" inside "(R)-2-butanol") is not counted as a second, hedged option.
+    remaining = f" {_normalize_text(_strip_chain_of_thought(response))} "
+    targets = [
+        (f" {_normalize_text(str(choice))} ", letter) for letter, choice in zip(valid_letters, choices, strict=False)
     ]
+    matched = []
+    for target, letter in sorted(targets, key=lambda item: len(item[0]), reverse=True):
+        if target.strip() and target in remaining:
+            matched.append(letter)
+            remaining = remaining.replace(target, " | ")
     return matched[0] if len(matched) == 1 else None
 
 
@@ -116,13 +144,15 @@ def compute_gpqa_reward(response: str, label, metadata: dict | None = None) -> f
     if correct_letter and choices:
         return 1.0 if _unique_choice_letter(response, choices, valid_letters) == correct_letter else 0.0
 
-    # Single-letter labels are option letters, never answer text: a substring test on them
-    # would credit any response containing that character.
+    # Option letters are never answer text: a substring test on them would credit any response
+    # containing that character.
     candidate_answers = [str(metadata[key]) for key in ("correct_answer", "answer_text") if metadata.get(key)]
     if label_text and not correct_letter:
         candidate_answers.append(label_text)
 
-    normalized_targets = {_normalize_text(text) for text in candidate_answers if len(text.strip()) > 1}
+    normalized_targets = {
+        _normalize_text(text) for text in candidate_answers if text.strip().upper() not in valid_letters
+    }
     normalized_response = f" {_normalize_text(_strip_chain_of_thought(response))} "
     for target in normalized_targets:
         if target and f" {target} " in normalized_response:
