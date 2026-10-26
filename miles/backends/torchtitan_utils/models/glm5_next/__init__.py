@@ -121,8 +121,9 @@ def _require_supported(text) -> None:
             text.index_kpool > 1 and text.index_kpool_compress and text.index_kpool_always_select_tail
         ),
         "mhc must be on": not text.mhc,
-        "layer_types must be linear_attention / deepseek_sparse_attention": not set(text.layer_types)
-        <= {"linear_attention", "deepseek_sparse_attention"},
+        # transformers renames the checkpoint's deepseek_sparse_attention to indexed_attention on load
+        "layer_types must be linear_attention / indexed_attention": not set(text.layer_types)
+        <= {"linear_attention", "indexed_attention"},
         "mlp_layer_types must be dense / sparse": not set(text.mlp_layer_types) <= {"dense", "sparse"},
         "linear_attention layers need linear_attn_config": "linear_attention" in text.layer_types
         # config-access-exempt: linear_attn_config is optional; this check is what makes it required for KDA
