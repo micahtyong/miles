@@ -220,6 +220,7 @@ _RESOLVED_ROLLOUT_FIELDS: dict[str, Any] = dict(
     raw_torchtitan=None,
     lora_A_init_method="xavier",
     lora_B_init_method="zero",
+    lora_sync_sends_base=True,
 )
 
 _CUSTOM_FUNCTION_FIELDS = [
