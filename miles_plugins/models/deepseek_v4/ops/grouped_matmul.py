@@ -2,12 +2,13 @@ import torch
 import torch.nn as nn
 
 
-class GroupedMatmul(nn.Module):
-    """Group ``g`` of ``x`` times row block ``g`` of ``weight``; a module so a LoRA adapter can wrap the product."""
+def grouped_matmul(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    """Group ``g`` of ``x`` [b, s, g, d] times row block ``g`` of ``weight`` [g * r, d]."""
+    return torch.einsum("bsgd,grd->bsgr", x, weight.view(x.shape[2], -1, weight.shape[-1]))
 
-    def __init__(self, n_groups: int):
-        super().__init__()
-        self.n_groups = n_groups
+
+class GroupedMatmul(nn.Module):
+    """``grouped_matmul`` as a module, so a LoRA adapter can wrap the product."""
 
     def forward(self, x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
-        return torch.einsum("bsgd,grd->bsgr", x, weight.view(self.n_groups, -1, weight.shape[-1]))
+        return grouped_matmul(x, weight)

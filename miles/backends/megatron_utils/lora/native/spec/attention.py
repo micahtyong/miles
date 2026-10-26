@@ -351,7 +351,6 @@ class DeepSeekV41AttentionSpec(AttentionSpecBase):
             context=context,
             in_features=weight.shape[1],
             out_features=weight.shape[0],
-            n_groups=block.n_local_groups,
         )
         attach_adapter_forward(block.o_group_matmul, block.lora_o_a_adapter, context.lora.scale)
         return count + 1

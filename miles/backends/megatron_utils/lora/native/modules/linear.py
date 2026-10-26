@@ -13,6 +13,7 @@ import torch.nn.functional as F
 
 from miles.backends.megatron_utils.lora.native.distributed import apply_lora_dropout, branch_input, reduce_row_parallel
 from miles.backends.megatron_utils.lora.native.spec.base import AttachContext, ProjectionSpec, ShardLayout
+from miles_plugins.models.deepseek_v4.ops.grouped_matmul import grouped_matmul
 
 
 @dataclass(frozen=True)
@@ -258,18 +259,16 @@ class LoRAGroupedColumnLinear(LoRALinear):
 
     host_returns_bias = False
 
-    def __init__(self, *, n_groups: int, **kwargs):
+    def __init__(self, **kwargs):
         super().__init__(**kwargs)
         assert self.layout == ShardLayout.COLUMN, f"{type(self).__name__} requires a column-parallel projection"
-        self.n_groups = n_groups
         # the host weight lives on the attention block; a list keeps it out of this adapter's parameters
         self._host_weight = [kwargs["reference"]]
 
     def forward(self, x: torch.Tensor, base_module: nn.Module, *_host_args) -> torch.Tensor:
-        b = getattr(self, f"{self.param_prefix}_B")
         x = apply_lora_dropout(x, self.context, base_module.training)
         down = F.linear(x, getattr(self, f"{self.param_prefix}_A"))
-        return torch.einsum("bsgk,grk->bsgr", down, b.view(self.n_groups, -1, b.shape[-1]))
+        return grouped_matmul(down, getattr(self, f"{self.param_prefix}_B"))
 
     def weight_deltas(self):
         (weight,) = self._host_weight

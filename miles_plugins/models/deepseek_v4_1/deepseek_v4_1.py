@@ -422,7 +422,7 @@ class DeepSeekV41Attention(MegatronModule):
         config.init_method(o_group_proj)
         self.linear_o_group_proj = nn.Parameter(o_group_proj)
         set_tensor_model_parallel_attributes(self.linear_o_group_proj, is_parallel=True, dim=0, stride=1)
-        self.o_group_matmul = GroupedMatmul(self.n_local_groups)
+        self.o_group_matmul = GroupedMatmul()
         self.linear_proj = TERowParallelLinear(
             self.n_groups * self.o_lora_rank,
             self.dim,

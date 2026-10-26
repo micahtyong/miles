@@ -18,7 +18,7 @@ from miles.backends.megatron_utils.lora.native.spec.base import AttachContext
 from miles.utils.hf_utils.config import register_hf_config_aliases
 from miles.utils.lora.arguments import _resolve_lora_targets
 from miles.utils.lora.utils import get_adapter_target_modules
-from miles_plugins.models.deepseek_v4.ops.grouped_matmul import GroupedMatmul
+from miles_plugins.models.deepseek_v4.ops.grouped_matmul import GroupedMatmul, grouped_matmul
 
 HIDDEN, Q_RANK, HEADS, HEAD_DIM, GROUPS, O_RANK, RANK, ALPHA = 8, 6, 4, 4, 2, 3, 2, 4
 GROUP_DIM = HEADS * HEAD_DIM // GROUPS
@@ -51,7 +51,7 @@ def _layer():
     attention.linear_o_group_proj = nn.Parameter(torch.randn(GROUPS * O_RANK, GROUP_DIM))
     attention.linear_o_group_proj.tensor_model_parallel = True
     attention.linear_o_group_proj.partition_dim = 0
-    attention.o_group_matmul = GroupedMatmul(GROUPS)
+    attention.o_group_matmul = GroupedMatmul()
     attention.linear_proj = _Linear(HIDDEN, GROUPS * O_RANK, "row")
 
     moe = nn.Module()
@@ -135,6 +135,4 @@ def test_grouped_wo_a_delta_is_a_lora_on_the_wo_a_weight(launcher_targets):
     merged = attention.linear_o_group_proj + ALPHA / RANK * lora_b.float() @ lora_a.float()
 
     o = torch.randn(2, 3, GROUPS, GROUP_DIM)
-    torch.testing.assert_close(
-        attention.o_group_matmul(o, attention.linear_o_group_proj), GroupedMatmul(GROUPS)(o, merged)
-    )
+    torch.testing.assert_close(attention.o_group_matmul(o, attention.linear_o_group_proj), grouped_matmul(o, merged))
