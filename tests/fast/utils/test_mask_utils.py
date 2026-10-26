@@ -119,21 +119,39 @@ def test_loss_mask_distill_keeps_context_and_trains_eos():
     token_ids, loss_mask = mask_generator.get_loss_mask(messages)
     assert len(token_ids) == len(loss_mask)
 
+    assert tokenizer.decode(token_ids).count("<think>") == 1
+
     prompt_text = tokenizer.decode([t for t, m in zip(token_ids, loss_mask, strict=True) if m == 0])
     for content in ("You are a math tutor.", "WHAT IS 2+2", "FIRST ANSWER", "AND 3+3"):
         assert content in prompt_text
 
     trained_ids = [t for t, m in zip(token_ids, loss_mask, strict=True) if m == 1]
     assert trained_ids[-1] == tokenizer.eos_token_id
-    assert tokenizer.decode(trained_ids[:-1]) == "<think>\nadd them\n</think>\n\nSIX"
+    assert tokenizer.decode(trained_ids[:-1]) == "add them\n</think>\n\nSIX"
 
 
-def test_loss_mask_distill_rejects_trailing_non_assistant_message():
+def test_loss_mask_distill_trims_untrainable_trailing_messages():
+    mask_generator = _distill_mask_generator()
+    tokenizer = mask_generator.tokenizer
+    tool_call = {"function": {"name": "ls", "arguments": "{}"}, "id": "call_0", "type": "function"}
+    messages = [
+        {"role": "user", "content": "LIST FILES"},
+        {"role": "assistant", "content": "SURE"},
+        {"role": "user", "content": "NOW RUN IT"},
+        {"role": "assistant", "content": "", "tool_calls": [tool_call]},
+        {"role": "tool", "content": "TOOLOUT"},
+    ]
+    token_ids, loss_mask = mask_generator.get_loss_mask(messages)
+    assert "TOOLOUT" not in tokenizer.decode(token_ids)
+    trained_ids = [t for t, m in zip(token_ids, loss_mask, strict=True) if m == 1]
+    assert tokenizer.decode(trained_ids) == "SURE" + tokenizer.eos_token
+
+
+def test_loss_mask_distill_rejects_sample_without_plain_assistant_answer():
     mask_generator = _distill_mask_generator()
     messages = [
         {"role": "user", "content": "LIST FILES"},
-        {"role": "assistant", "content": "CALLING ls"},
         {"role": "tool", "content": "TOOLOUT"},
     ]
-    with pytest.raises(ValueError, match="final assistant message"):
+    with pytest.raises(ValueError, match="assistant message without tool_calls"):
         mask_generator.get_loss_mask(messages)

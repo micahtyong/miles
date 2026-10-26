@@ -1,4 +1,8 @@
+import logging
+
 from transformers import AutoTokenizer
+
+logger = logging.getLogger(__name__)
 
 
 def get_response_lengths(loss_masks: list[list[int]]) -> list[int]:
@@ -115,18 +119,30 @@ class MultiTurnLossMaskGenerator:
     def gen_multi_turn_loss_mask_distill_qwen(
         self, messages: list[dict], tools: list[dict] = None
     ) -> tuple[list[int], list[int]]:
-        # Trains only the final assistant answer, tokenized from its raw content so its reasoning
-        # survives (the DeepSeek template strips `<think>` from rendered assistant turns). Every
-        # earlier message is rendered as untrained prompt context.
-        if messages[-1]["role"] != "assistant":
-            raise ValueError(
-                f"distill_qwen loss mask trains the final assistant message, but the last message has role "
-                f"{messages[-1]['role']!r}"
+        # Trains only the final plain-text assistant answer, tokenized from its raw content so its
+        # reasoning survives (the DeepSeek template strips `<think>` from rendered assistant turns).
+        # Every earlier message is rendered as untrained prompt context. Trailing turns that cannot
+        # be trained this way (tool/user messages, assistant tool calls) are trimmed off.
+        last = max(
+            (i for i, m in enumerate(messages) if m["role"] == "assistant" and not m.get("tool_calls")),
+            default=None,
+        )
+        if last is None:
+            raise ValueError("distill_qwen loss mask needs an assistant message without tool_calls to train")
+        if last != len(messages) - 1:
+            logger.warning(
+                f"distill_qwen loss mask: trimming {len(messages) - 1 - last} trailing message(s) after the last "
+                f"plain assistant answer"
             )
+            messages = messages[: last + 1]
+
         prompt = self.tokenizer.apply_chat_template(
             messages[:-1], tokenize=False, add_generation_prompt=True, tools=tools
         )
         response = messages[-1]["content"]
+        # The DeepSeek generation prompt already opens the reasoning block; do not repeat the tag.
+        if prompt.endswith("<think>\n") and response.startswith("<think>"):
+            response = response[len("<think>") :].removeprefix("\n")
         prompt_tokens = self.tokenizer(prompt, add_special_tokens=False)["input_ids"]
         response_tokens = self.tokenizer(response, add_special_tokens=False)["input_ids"]
         if self.tokenizer.eos_token_id is not None:
