@@ -4,10 +4,12 @@ from contextlib import contextmanager
 import torch
 import torch.distributed as dist
 
+from miles.backends.megatron_utils.checkpoint_request import MegatronCkptLoadConfig
 from miles.backends.torchtitan_utils import compat
 from miles.backends.torchtitan_utils.args_namespace import TorchtitanArgsNamespace
 from miles.backends.torchtitan_utils.config import build_trainer_config
 from miles.backends.torchtitan_utils.hf_weight_iterator import TitanHfWeightIterator
+from miles.backends.torchtitan_utils.optimizer_state_on_disk import setup_adam_state_on_disk
 from miles.backends.torchtitan_utils.parallel import create_titan_parallel_state, parallel_dims_from_config
 from miles.backends.torchtitan_utils.routing_replay import install as install_routing_replay
 from miles.backends.torchtitan_utils.trainer import TitanTrainer
@@ -18,8 +20,10 @@ from miles.backends.training_utils.torch_native.step_runner import StepRunner
 from miles.platforms import current_platform
 from miles.utils.args.runtime import TrainerConfig
 from miles.utils.context_utils import with_defer
+from miles.utils.disk_backed_tensor import optimizer_state_dir_root
+from miles.utils.distributed_utils import get_gloo_group
 from miles.utils.ft_utils.indep_dp import IndepDPInfo
-from miles.utils.memory_utils import clear_memory
+from miles.utils.memory_utils import clear_memory, print_memory
 from miles.utils.profile_utils import TrainProfiler
 from miles.utils.timer import Timer
 from miles.utils.tracking_utils.tracking import init_tracking
@@ -41,12 +45,14 @@ class TorchtitanTrainRayActor(TorchNativeTrainRayActor):
         args: Pickled,
         role: str,
         *,
+        ckpt_load_config: MegatronCkptLoadConfig | None = None,
         with_ref: bool = False,
         with_opd_teacher: bool = False,
         recv_ckpt_src_rank: int | None = None,
         indep_dp_info: IndepDPInfo,
         indep_dp_store_addr: str | None,
     ) -> int | None:  # type: ignore[override]
+        assert ckpt_load_config is None, "torchtitan backend does not support checkpoint healing"
         assert isinstance(args.backend, TorchtitanArgsNamespace)
         compat.install()
         super()._init_common(args, role, with_ref, with_opd_teacher=with_opd_teacher)
@@ -88,6 +94,8 @@ class TorchtitanTrainRayActor(TorchNativeTrainRayActor):
             init_tracking(args, primary=False)
 
         self.trainer.checkpointer.load()
+        if args.stream_optimizer_state_to_disk:
+            setup_adam_state_on_disk(self.optimizers, state_dir_root=optimizer_state_dir_root(args))
         start_rollout_id = self.trainer.step // _steps_per_rollout(args)
 
         if with_ref:
@@ -100,6 +108,17 @@ class TorchtitanTrainRayActor(TorchNativeTrainRayActor):
             self.sleep()
         self.prof.on_init_end()
         return args.start_rollout_id if args.start_rollout_id is not None else start_rollout_id
+
+    def _move_train_state(self, *, to_host: bool) -> None:
+        if not self.args.backend.optimizer_cpu_offload:
+            super()._move_train_state(to_host=to_host)
+            return
+        # the training state already lives on the host; moving it would pull it all onto the GPU on wake
+        where = "host" if to_host else "device"
+        print_memory(f"before releasing the GPU cache for {where}")
+        clear_memory()
+        dist.barrier(group=get_gloo_group())
+        print_memory(f"after releasing the GPU cache for {where}")
 
     def _step_runner(self):
         return self.trainer.step_runner()

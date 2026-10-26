@@ -77,6 +77,7 @@
 | `kill_train__dp4_cp2_tp2_pp2_ep2_etp2__moe_full` | 4 train + 2 rollout | 32 + 16 | 4 | CP2 TP2 PP2 EP2 ETP2 | 2 engines × 8 GPU | full MoE | `("train",)` | full model, all parallelism; multi-node, so no CI entry |
 
 - **Batch shape**: `--rollout-batch-size 32 --n-samples-per-prompt 8 --global-batch-size 256` everywhere — 256 samples per rollout, divisible by both 2 and 4 cells. `scenario_trainer_with_failure` x `kill_train__dp4_cp2__fake_rollout__moe_5layer` trains the fault rollout on the 3 surviving cells, so the uneven 256-over-3 split is exercised there.
+- **Microbatch token budget**: `kill_train__dp2_cp2__moe_5layer` uses `--max-tokens-per-gpu 8192` on both comparison sides to bound backward memory on 80 GiB H100s. Other modes use 32768. The rollout and global batch sizes remain 256 samples.
 - **Model**: 1-node modes use the 5-layer MoE `Qwen3-30B-A3B-5layer`, except the five dense modes.
 
 ## Running the code
@@ -616,6 +617,9 @@ Fault recovery must not cost end-to-end learning, which the comparison scenarios
 - **Why the threshold does not move**: it is the entire value of this scenario, so engine crashes are paid for with a lower rollout crash rate, never with a lower bar.
 
 ### `scenario_random_crash_fully_async` and `scenario_realistic_gsm8k_fully_async`
+
+- **Random-crash Ray final evaluation**: the fully-async soak uses the normal `train_async.py` entry and evaluates the prepared GSM8K test split after the final weight update, with no pre-training eval, one sample per prompt and a 200-token response limit. Normal eval preparation resumes rollout health checks; the original final-state and fault-coverage assertions remain unchanged.
+- **Random-crash Ray probe grace**: the fully-async eager soak sets `--trainer-heartbeat-checker-first-wait 0`; a 300-second wait after each recovery otherwise consumes its 60-rollout injection window before every enabled fault form can run. Health probes, quiescence, recovery witnesses and coverage assertions remain mandatory.
 
 ```
 Type: shells - each calls its sync twin with fully_async=True and pins nothing else
