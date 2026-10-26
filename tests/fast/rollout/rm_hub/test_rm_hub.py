@@ -40,6 +40,9 @@ class TestAsyncRm:
             ("boxed_dapo", r"<think>2+3=5</think> So the result is \boxed{5}.", "5", {"score": 1.0}),
             ("boxed_dapo", r"<think>2+3=5</think> So the result is \boxed{6}.", "5", {"score": -1.0}),
             ("boxed_math", "no box here", "5", 0),
+            # A box only inside unfinished reasoning must not count for graders that need a closer.
+            ("boxed_deepscaler", r"<think>so \boxed{5} maybe", "5", 0),
+            ("boxed_gemma_math", r"\boxed{5} thinking<channel|>the answer is 5", "5", 0),
         ],
     )
     def test_rm_types(self, mock_args, rm_type, response, label, expected):
