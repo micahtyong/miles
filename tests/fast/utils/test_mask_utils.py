@@ -1,3 +1,6 @@
+import pytest
+
+
 from miles.utils.mask_utils import MultiTurnLossMaskGenerator
 from miles.utils.processing_utils import load_tokenizer
 
@@ -96,3 +99,41 @@ def test_loss_mask_qwen3_tools(model_name: str = "Qwen/Qwen3-8B"):
 if __name__ == "__main__":
     test_loss_mask_qwen3_simple("Qwen/Qwen3-Coder-30B-A3B-Instruct")
     test_loss_mask_qwen3_tools("Qwen/Qwen3-Coder-30B-A3B-Instruct")
+
+
+def _distill_mask_generator(model_name: str = "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B") -> MultiTurnLossMaskGenerator:
+    # The default `qwen` type routes DeepSeek-style tokenizers to the distill path.
+    return MultiTurnLossMaskGenerator(load_tokenizer(model_name), tokenizer_type="qwen")
+
+
+def test_loss_mask_distill_keeps_context_and_trains_eos():
+    mask_generator = _distill_mask_generator()
+    tokenizer = mask_generator.tokenizer
+    messages = [
+        {"role": "system", "content": "You are a math tutor."},
+        {"role": "user", "content": "WHAT IS 2+2"},
+        {"role": "assistant", "content": "FIRST ANSWER"},
+        {"role": "user", "content": "AND 3+3"},
+        {"role": "assistant", "content": "<think>\nadd them\n</think>\n\nSIX"},
+    ]
+    token_ids, loss_mask = mask_generator.get_loss_mask(messages)
+    assert len(token_ids) == len(loss_mask)
+
+    prompt_text = tokenizer.decode([t for t, m in zip(token_ids, loss_mask, strict=True) if m == 0])
+    for content in ("You are a math tutor.", "WHAT IS 2+2", "FIRST ANSWER", "AND 3+3"):
+        assert content in prompt_text
+
+    trained_ids = [t for t, m in zip(token_ids, loss_mask, strict=True) if m == 1]
+    assert trained_ids[-1] == tokenizer.eos_token_id
+    assert tokenizer.decode(trained_ids[:-1]) == "<think>\nadd them\n</think>\n\nSIX"
+
+
+def test_loss_mask_distill_rejects_trailing_non_assistant_message():
+    mask_generator = _distill_mask_generator()
+    messages = [
+        {"role": "user", "content": "LIST FILES"},
+        {"role": "assistant", "content": "CALLING ls"},
+        {"role": "tool", "content": "TOOLOUT"},
+    ]
+    with pytest.raises(ValueError, match="final assistant message"):
+        mask_generator.get_loss_mask(messages)

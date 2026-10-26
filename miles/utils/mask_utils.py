@@ -115,16 +115,25 @@ class MultiTurnLossMaskGenerator:
     def gen_multi_turn_loss_mask_distill_qwen(
         self, messages: list[dict], tools: list[dict] = None
     ) -> tuple[list[int], list[int]]:
+        # Trains only the final assistant answer, tokenized from its raw content so its reasoning
+        # survives (the DeepSeek template strips `<think>` from rendered assistant turns). Every
+        # earlier message is rendered as untrained prompt context.
+        if messages[-1]["role"] != "assistant":
+            raise ValueError(
+                f"distill_qwen loss mask trains the final assistant message, but the last message has role "
+                f"{messages[-1]['role']!r}"
+            )
         prompt = self.tokenizer.apply_chat_template(
-            messages[:1], tokenize=False, add_generation_prompt=True, tools=tools
+            messages[:-1], tokenize=False, add_generation_prompt=True, tools=tools
         )
         response = messages[-1]["content"]
         prompt_tokens = self.tokenizer(prompt, add_special_tokens=False)["input_ids"]
         response_tokens = self.tokenizer(response, add_special_tokens=False)["input_ids"]
+        if self.tokenizer.eos_token_id is not None:
+            response_tokens.append(self.tokenizer.eos_token_id)
 
-        response_length = len(response_tokens)
         token_ids = prompt_tokens + response_tokens
-        loss_mask = [0] * len(prompt_tokens) + [1] * response_length
+        loss_mask = [0] * len(prompt_tokens) + [1] * len(response_tokens)
 
         if messages[-1].get("step_loss_mask", 1) != 1:
             loss_mask = [0] * len(token_ids)
